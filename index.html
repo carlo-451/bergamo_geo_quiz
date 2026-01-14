@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoProvincia Challenge - Versione Finale</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script src="dati.js"></script>
+
+    <style>
+        /* STILE GRAFICO */
+        body { margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; overflow: hidden; }
+        
+        /* Schermata Iniziale */
+        #start-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 2000;
+        }
+        .card { background: white; color: #333; padding: 30px; border-radius: 15px; text-align: center; width: 90%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+        select, button { width: 100%; padding: 12px; margin-top: 15px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        button { background: #27ae60; color: white; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        button:hover { background: #2ecc71; transform: scale(1.02); }
+        
+        /* Gioco */
+        #game-container { display: none; height: 100vh; flex-direction: column; }
+        #header { background: #2c3e50; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; z-index: 1001; }
+        #map { flex-grow: 1; width: 100%; background: #ddd; }
+        
+        /* UI Galleggiante (Domande) */
+        #game-ui {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 12px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.3); z-index: 1000;
+            width: 90%; max-width: 400px; text-align: center;
+        }
+        .question { font-size: 20px; font-weight: bold; color: #2c3e50; margin-bottom: 15px; }
+        .options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .opt-btn { background: #3498db; margin: 0; color: white; }
+        .hidden { display: none !important; }
+        
+        /* Popup Risultati */
+        #feedback-modal {
+            display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: white; padding: 20px; border-radius: 10px; z-index: 3000;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5); text-align: center; border: 2px solid #2c3e50; min-width: 250px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="start-screen">
+        <h1>📍 GeoProvincia</h1>
+        <p>Quanto conosci Bergamo e dintorni?</p>
+        <div class="card">
+            <p id="loading-msg">Caricamento dati...</p>
+            <div id="start-controls" class="hidden">
+                <label>Scegli la modalità:</label>
+                <select id="mode-select">
+                    <option value="mute">📍 Mappa Muta (Trova il paese)</option>
+                    <option value="shapes">🧩 Confini (Indovina il nome)</option>
+                </select>
+                <button onclick="startGame()">Inizia la Sfida</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="game-container">
+        <div id="header">
+            <div id="mode-title">Mappa</div>
+            <div style="font-weight: bold;" id="score-display">Punti: 0</div>
+            <button style="width: auto; margin:0; padding: 5px 10px; background: #c0392b;" onclick="location.reload()">Esci</button>
+        </div>
+        <div id="map"></div>
+        
+        <div id="game-ui">
+            <div id="question-text" class="question">...</div>
+            <div id="options-area" class="options-grid hidden"></div>
+            <button id="next-btn" class="hidden" onclick="nextRound()">Prossimo Turno</button>
+        </div>
+    </div>
+
+    <div id="feedback-modal">
+        <h2 id="fb-title">Risultato</h2>
+        <p id="fb-msg">Dettagli...</p>
+        <button onclick="closeFeedback()">Avanti</button>
+    </div>
+
+<script>
+    // --- VARIABILI GLOBALI ---
+    let map, currentMode, currentTarget;
+    let score = 0;
+    let markersLayer = L.layerGroup();
+    let geoJsonLayer; // Per il confine rosso (Modalità 2)
+    let bordersLayer; // Per la griglia grigia (Modalità 1)
+    let elencoComuni = []; // Lista pulita dei comuni
+
+    // --- CARICAMENTO DATI INTELLIGENTE ---
+    window.onload = function() {
+        if (typeof confiniComuni !== 'undefined') {
+            console.log("File dati.js trovato. Analisi in corso...");
+            
+            confiniComuni.features.forEach(feature => {
+                let tempLayer = L.geoJSON(feature);
+                let center = tempLayer.getBounds().getCenter();
+                let props = feature.properties;
+                
+                // CERCA IL NOME IN TUTTI I MODI POSSIBILI
+                // (GitHub usa spesso 'name', ISTAT usa 'COMUNE' o 'DENOMINAZIONE')
+                let nomeComune = props.name || props.NAME || props.COMUNE || props.NOME_CP || props.DENOMINAZIONE || "Sconosciuto";
+                
+                // Salviamo nella nostra lista pulita
+                elencoComuni.push({
+                    nome: nomeComune,
+                    lat: center.lat,
+                    lon: center.lng
+                });
+            });
+
+            // Sblocca il gioco
+            document.getElementById('loading-msg').style.display = 'none';
+            document.getElementById('start-controls').classList.remove('hidden');
+            console.log("Caricati " + elencoComuni.length + " comuni.");
+
+        } else {
+            document.getElementById('loading-msg').innerHTML = "❌ ERRORE: File dati.js non trovato o corrotto.<br>Controlla che inizi con 'const confiniComuni ='";
+            document.getElementById('loading-msg').style.color = "red";
+        }
+    };
+
+    // --- AVVIO PARTITA ---
+    function startGame() {
+        currentMode = document.getElementById('mode-select').value;
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('game-container').style.display = 'flex';
+        document.getElementById('mode-title').innerText = currentMode === 'mute' ? "📍 Trova il paese" : "🧩 Di chi è questo confine?";
+
+        initMap();
+        nextRound();
+    }
+
+    function initMap() {
+        // Centriamo la mappa (Coordinate generiche Bergamo)
+        map = L.map('map').setView([45.72, 9.75], 10);
+        markersLayer.addTo(map);
+
+        // Sfondo pulito (senza etichette)
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png', {
+            attribution: '© OpenStreetMap, © CARTO',
+            maxZoom: 19
+        }).addTo(map);
+
+        // Click sulla mappa attivo solo per la modalità "Muta"
+        map.on('click', handleMapClick);
+    }
+
+    function nextRound() {
+        // Pulizia totale
+        markersLayer.clearLayers();
+        if(geoJsonLayer) map.removeLayer(geoJsonLayer);
+        if(bordersLayer) map.removeLayer(bordersLayer);
+
+        document.getElementById('options-area').innerHTML = '';
+        document.getElementById('options-area').classList.add('hidden');
+        document.getElementById('next-btn').classList.add('hidden');
+
+        // Scelta modalità
+        if (currentMode === 'mute') {
+            setupMuteMode();
+        } else {
+            setupShapeMode();
+        }
+    }
+
+    // --- MODALITÀ 1: MAPPA MUTA (Con Griglia) ---
+    function setupMuteMode() {
+        // 1. Disegna la GRIGLIA GRIGIA di tutti i comuni per orientarsi
+        bordersLayer = L.geoJSON(confiniComuni, {
+            style: { 
+                color: "#999",       // Grigio scuro
+                weight: 1,           // Linea sottile
+                fillColor: "white",  // Riempimento
+                fillOpacity: 0.0     // Trasparente (per vedere lo sfondo)
+            },
+            interactive: false // IMPORTANTE: Il click passa attraverso!
+        }).addTo(map);
+
+        // 2. Scegli un target
+        currentTarget = elencoComuni[Math.floor(Math.random() * elencoComuni.length)];
+        document.getElementById('question-text').innerText = `Dov'è ${currentTarget.nome}?`;
+        document.getElementById('question-text').classList.remove('hidden');
+    }
+
+    function handleMapClick(e) {
+        if (currentMode !== 'mute' || document.getElementById('next-btn').style.display === 'block') return;
+
+        // Calcoli
+        const dist = getDistance(e.latlng.lat, e.latlng.lng, currentTarget.lat, currentTarget.lon);
+        let points = Math.max(0, 100 - Math.round(dist * 2)); 
+        score += points;
+
+        // Feedback visivo sulla mappa
+        L.marker([e.latlng.lat, e.latlng.lng]).addTo(markersLayer).bindPopup("Tuo click").openPopup();
+        L.circleMarker([currentTarget.lat, currentTarget.lon], {color: 'green', radius: 8}).addTo(markersLayer).bindPopup(currentTarget.nome);
+        L.polyline([[e.latlng.lat, e.latlng.lng], [currentTarget.lat, currentTarget.lon]], {color: 'red', dashArray: '5, 10'}).addTo(markersLayer);
+
+        showFeedback(points, `Distanza: ${dist.toFixed(1)} km`);
+    }
+
+    // --- MODALITÀ 2: CONFINI ---
+    function setupShapeMode() {
+        // Pesca un poligono a caso
+        const features = confiniComuni.features;
+        const randomFeature = features[Math.floor(Math.random() * features.length)];
+        let props = randomFeature.properties;
+        currentTarget = props.name || props.NAME || props.COMUNE || props.NOME_CP || "Sconosciuto";
+
+        // Disegna solo quel poligono in ROSSO
+        geoJsonLayer = L.geoJSON(randomFeature, {
+            style: { color: "#e74c3c", weight: 3, fillOpacity: 0.4 }
+        }).addTo(map);
+        map.fitBounds(geoJsonLayer.getBounds()); // Zoom automatico
+
+        // Genera opzioni (1 giusta + 3 sbagliate)
+        let options = [currentTarget];
+        while (options.length < 4) {
+            let wrong = elencoComuni[Math.floor(Math.random() * elencoComuni.length)].nome;
+            if (!options.includes(wrong) && wrong !== "Sconosciuto") options.push(wrong);
+        }
+        options.sort(() => Math.random() - 0.5);
+
+        // Mostra i bottoni
+        const container = document.getElementById('options-area');
+        container.classList.remove('hidden');
+        document.getElementById('question-text').innerText = "Che comune è questo?";
+        
+        options.forEach(opt => {
+            let btn = document.createElement('button');
+            btn.className = 'opt-btn';
+            btn.innerText = opt;
+            btn.onclick = () => checkShapeAnswer(opt);
+            container.appendChild(btn);
+        });
+    }
+
+    function checkShapeAnswer(selected) {
+        let points = 0;
+        let msg = "";
+        if (selected === currentTarget) {
+            points = 100;
+            msg = "Risposta Esatta!";
+            score += points;
+        } else {
+            msg = `No! Era ${currentTarget}`;
+        }
+        showFeedback(points, msg);
+    }
+
+    // --- FUNZIONI DI UTILITÀ ---
+    function showFeedback(pts, msg) {
+        document.getElementById('score-display').innerText = "Punti: " + score;
+        document.getElementById('fb-title').innerText = pts > 0 ? `+${pts} Punti!` : "0 Punti";
+        document.getElementById('fb-title').style.color = pts > 0 ? "green" : "red";
+        document.getElementById('fb-msg').innerText = msg;
+        document.getElementById('feedback-modal').style.display = 'block';
+        document.getElementById('next-btn').style.display = 'inline-block'; // Mostra tasto next anche nella UI
+    }
+
+    function closeFeedback() {
+        document.getElementById('feedback-modal').style.display = 'none';
+        // Se siamo in mappa muta, aspettiamo che l'utente prema "Prossimo Turno" dalla UI principale
+        // Se siamo in confini, andiamo avanti subito o aspettiamo? Meglio uniforme:
+        // Lasciamo che sia l'utente a cliccare "Prossimo Turno" sul tasto bianco in basso.
+        document.getElementById('next-btn').classList.remove('hidden');
+    }
+
+    function getDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; 
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+</script>
+</body>
+</html>
